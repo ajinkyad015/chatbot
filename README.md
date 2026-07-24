@@ -1,2 +1,2 @@
 # chatbot
-this repo is to learn AI concepts and build using them parallely.
+This repo is to learn AI concepts and build using them in parallel.
