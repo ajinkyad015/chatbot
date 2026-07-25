@@ -5,76 +5,14 @@ from datetime import datetime, timedelta, timezone
 import jwt
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from pydantic import BaseModel
 
 from llm_harness import generate, LLMError
 
-
+from schema import LoginRequest, ChatRequest, ChatResponse, Usage
+from authentication import authenticate, DEMO_USERNAME, DEMO_PASSWORD, JWT_SECRET, JWT_ALGORITHM, TOKEN_EXPIRE_MINUTES
 load_dotenv()
 
 app = FastAPI()
-
-JWT_SECRET = os.environ["JWT_SECRET"]
-JWT_ALGORITHM = "HS256"
-TOKEN_EXPIRE_MINUTES = 30
-
-# Learning only — never hardcode real credentials in production.
-DEMO_USERNAME = "demo"
-DEMO_PASSWORD = "demo123"
-
-security = HTTPBearer()
-
-
-class LoginRequest(BaseModel):
-    username: str
-    password: str
-
-
-class ChatRequest(BaseModel):
-    message: str
-
-
-class Usage(BaseModel):
-    input_tokens: int
-    output_tokens: int
-
-
-class ChatResponse(BaseModel):
-    response: str
-    model: str
-    usage: Usage
-    latency_ms: int
-
-
-def authenticate(
-    credentials: HTTPAuthorizationCredentials = Depends(security),
-):
-    token = credentials.credentials
-
-    try:
-        payload = jwt.decode(
-            token,
-            JWT_SECRET,
-            algorithms=[JWT_ALGORITHM],
-        )
-
-        username = payload.get("sub")
-
-        if not username:
-            raise HTTPException(
-                status_code=401,
-                detail="Invalid token",
-            )
-
-        return username
-
-    except jwt.InvalidTokenError:
-        raise HTTPException(
-            status_code=401,
-            detail="Invalid or expired token",
-        )
-
 
 @app.get("/health")
 def health():
