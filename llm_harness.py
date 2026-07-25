@@ -1,12 +1,14 @@
 import os
 import time
 from dataclasses import dataclass
-
+import asyncio
+from dotenv import load_dotenv
 from google import genai
 from google.genai import types, errors
+load_dotenv()
 
 
-MODEL = "gemini-3.6-flash"
+MODEL = "gemini-3.5-flash"
 TIMEOUT_SECONDS = 10
 MAX_ATTEMPTS = 3
 BASE_BACKOFF_SECONDS = 1
@@ -34,13 +36,12 @@ class LLMError(Exception):
     """Error exposed by the LLM harness to the application."""
     pass
 
-
-def generate(user_input: str) -> LLMResult:
+async def generate(user_input: str) -> LLMResult:
     start = time.perf_counter()
 
     for attempt in range(1, MAX_ATTEMPTS + 1):
         try:
-            response = client.models.generate_content(
+            response =  await client.aio.models.generate_content(
                 model=MODEL,
                 contents=user_input,
                 config=types.GenerateContentConfig(
@@ -94,7 +95,7 @@ def generate(user_input: str) -> LLMResult:
                 f"(status {status}). Retrying in {wait_seconds}s..."
             )
 
-            time.sleep(wait_seconds)
+            await asyncio.sleep(wait_seconds)
 
         except (TimeoutError, ConnectionError) as e:
             if attempt == MAX_ATTEMPTS:

@@ -1,28 +1,43 @@
-from dotenv import load_dotenv
-
-load_dotenv()
+# app.py
+from fastapi import FastAPI
+from pydantic import BaseModel
 
 from llm_harness import generate, LLMError
 
+app = FastAPI()
 
-while True:
-    user_input = input("You: ")
 
-    if user_input.lower() in ("exit", "quit"):
-        break
+class ChatRequest(BaseModel):
+    message: str
 
-    try:
-        result = generate(user_input)
 
-        print()
-        print("AI:", result.text)
-        print()
-        print(f"Model: {result.model}")
-        print(f"Latency: {result.latency:.2f}s")
-        print(f"Input tokens: {result.input_tokens}")
-        print(f"Output tokens: {result.output_tokens}")
-        print(f"Attempts: {result.attempts}")
-        print()
+class Usage(BaseModel):
+    input_tokens: int
+    output_tokens: int
 
-    except LLMError as e:
-        print(f"[LLM error] {e}")
+
+class ChatResponse(BaseModel):
+    response: str
+    model: str
+    usage: Usage
+    latency_ms: int
+
+
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+
+
+@app.post("/chat", response_model=ChatResponse)
+async def chat(body: ChatRequest):
+    result = await generate(body.message)
+
+    return ChatResponse(
+        response=result.text,
+        model=result.model,
+        usage=Usage(
+            input_tokens=result.input_tokens,
+            output_tokens=result.output_tokens,
+        ),
+        latency_ms=round(result.latency * 1000),
+    )
