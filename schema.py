@@ -11,12 +11,18 @@ class LoginRequest(BaseModel):
     password: str
 
 
+
 class TokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
 
 
+class CreateConversationResponse(BaseModel):
+    conversation_id: int
+
+
 class ChatRequest(BaseModel):
+    conversation_id: int
     message: str = Field(min_length=1, max_length=10_000)
 
 

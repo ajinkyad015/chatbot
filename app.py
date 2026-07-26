@@ -1,4 +1,9 @@
 from fastapi import Depends, FastAPI, HTTPException
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+import models
+from database import Base, engine, get_db
 
 from authentication import (
     authenticate_user,
@@ -10,15 +15,17 @@ from llm_harness import generate, LLMError
 from schema import (
     ChatRequest,
     ChatResponse,
+    CreateConversationResponse,
     LoginRequest,
     RegisterRequest,
     TokenResponse,
     Usage,
 )
-
+from database import Base, engine
+import models
 
 app = FastAPI()
-conversations: dict[str, list[dict[str, str]]] = {}
+Base.metadata.create_all(bind=engine)
 
 MAX_CONTEXT_MESSAGES = 20
 
@@ -60,26 +67,91 @@ def login(body: LoginRequest):
         access_token=token,
         token_type="bearer",
     )
+@app.post(
+    "/conversations",
+    response_model=CreateConversationResponse,
+    status_code=201,
+)
+def create_conversation(
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    username = current_user["username"]
 
+    conversation = models.Conversation(
+        user_id=username,
+    )
+
+    db.add(conversation)
+    db.commit()
+    db.refresh(conversation)
+
+    return CreateConversationResponse(
+        conversation_id=conversation.id,
+    )
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat(
     body: ChatRequest,
     current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
     username = current_user["username"]
 
-    history = conversations.setdefault(username, [])
+    # 1. Load the requested conversation.
+    conversation = db.get(
+        models.Conversation,
+        body.conversation_id,
+    )
+
+    if conversation is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Conversation not found",
+        )
+
+    # 2. Authorization: verify ownership.
+    if conversation.user_id != username:
+        raise HTTPException(
+            status_code=403,
+            detail="You do not have access to this conversation",
+        )
+
+    # 3. Load recent conversation history.
+    statement = (
+        select(models.Message)
+        .where(
+            models.Message.conversation_id == conversation.id
+        )
+        .order_by(models.Message.id.desc())
+        .limit(MAX_CONTEXT_MESSAGES)
+    )
+
+    history = list(
+        db.scalars(statement).all()
+    )
+
+    # Query was newest -> oldest.
+    # LLM needs oldest -> newest.
+    history.reverse()
+
+    # 4. Convert DB rows into the format expected by the LLM harness.
+    messages = [
+        {
+            "role": message.role,
+            "content": message.content,
+        }
+        for message in history
+    ]
 
     current_message = {
         "role": "user",
         "content": body.message,
     }
 
-    messages = history[-MAX_CONTEXT_MESSAGES:] + [
-        current_message
-    ]
+    messages.append(current_message)
 
+    # 5. Call the existing LLM harness.
     try:
         result = await generate(messages)
 
@@ -89,11 +161,22 @@ async def chat(
             detail="LLM provider failed",
         )
 
-    history.append(current_message)
-    history.append({
-        "role": "assistant",
-        "content": result.text,
-    })
+    # 6. Persist user + assistant messages.
+    user_message = models.Message(
+        conversation_id=conversation.id,
+        role="user",
+        content=body.message,
+    )
+
+    assistant_message = models.Message(
+        conversation_id=conversation.id,
+        role="assistant",
+        content=result.text,
+    )
+
+    db.add(user_message)
+    db.add(assistant_message)
+    db.commit()
 
     print(f"Messages in context: {len(messages)}")
     print(f"Input tokens: {result.input_tokens}")
