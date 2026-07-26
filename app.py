@@ -18,7 +18,9 @@ from schema import (
 
 
 app = FastAPI()
+conversations: dict[str, list[dict[str, str]]] = {}
 
+MAX_CONTEXT_MESSAGES = 20
 
 @app.get("/health")
 def health():
@@ -65,14 +67,36 @@ async def chat(
     body: ChatRequest,
     current_user: dict = Depends(get_current_user),
 ):
+    username = current_user["username"]
+
+    history = conversations.setdefault(username, [])
+
+    current_message = {
+        "role": "user",
+        "content": body.message,
+    }
+
+    messages = history[-MAX_CONTEXT_MESSAGES:] + [
+        current_message
+    ]
+
     try:
-        result = await generate(body.message)
+        result = await generate(messages)
 
     except LLMError:
         raise HTTPException(
             status_code=502,
             detail="LLM provider failed",
         )
+
+    history.append(current_message)
+    history.append({
+        "role": "assistant",
+        "content": result.text,
+    })
+
+    print(f"Messages in context: {len(messages)}")
+    print(f"Input tokens: {result.input_tokens}")
 
     return ChatResponse(
         response=result.text,

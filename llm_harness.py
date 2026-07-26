@@ -36,14 +36,24 @@ class LLMError(Exception):
     """Error exposed by the LLM harness to the application."""
     pass
 
-async def generate(user_input: str) -> LLMResult:
+async def generate(messages: list[dict[str, str]]) -> LLMResult:
     start = time.perf_counter()
 
     for attempt in range(1, MAX_ATTEMPTS + 1):
         try:
             response =  await client.aio.models.generate_content(
                 model=MODEL,
-                contents=user_input,
+                contents=[
+                    types.Content(
+                        role="model" if message["role"] == "assistant" else "user",
+                        parts=[
+                            types.Part.from_text(
+                                text=message["content"]
+                            )
+                        ],
+                    )
+                    for message in messages
+                ],
                 config=types.GenerateContentConfig(
                     system_instruction="You are a concise, helpful assistant."
                 )
