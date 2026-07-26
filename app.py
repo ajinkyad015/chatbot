@@ -29,10 +29,23 @@ Base.metadata.create_all(bind=engine)
 
 MAX_CONTEXT_MESSAGES = 20
 
+RATE_LIMIT_REQUESTS = 1
+RATE_LIMIT_WINDOW_SECONDS = 60
 @app.get("/health")
 def health():
     return {"status": "ok"}
 
+from redis_client import redis_client
+
+
+@app.get("/health/redis")
+async def redis_health():
+    pong = await redis_client.ping()
+
+    return {
+        "redis": "ok",
+        "ping": pong,
+    }
 
 @app.post("/register", status_code=201)
 def register(body: RegisterRequest):
@@ -115,6 +128,32 @@ async def chat(
         raise HTTPException(
             status_code=403,
             detail="You do not have access to this conversation",
+        )
+
+        username = current_user["username"]
+
+    rate_limit_key = f"rate_limit:{username}"
+
+    request_count = await redis_client.incr(rate_limit_key)
+
+    if request_count == 1:
+        await redis_client.expire(
+            rate_limit_key,
+            RATE_LIMIT_WINDOW_SECONDS,
+        )
+
+    ttl = await redis_client.ttl(rate_limit_key)
+
+    print(
+        f"[RATE LIMIT] user={username} "
+        f"count={request_count}/{RATE_LIMIT_REQUESTS} "
+        f"ttl={ttl}s"
+    )
+
+    if request_count > RATE_LIMIT_REQUESTS:
+        raise HTTPException(
+            status_code=429,
+            detail="Too many requests",
         )
 
     # 3. Load recent conversation history.
