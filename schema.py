@@ -36,3 +36,6 @@ class ChatResponse(BaseModel):
     model: str
     usage: Usage
     latency_ms: int
+
+class StatelessRequest(BaseModel):
+    message: str

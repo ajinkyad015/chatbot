@@ -20,22 +20,29 @@ from schema import (
     RegisterRequest,
     TokenResponse,
     Usage,
+    StatelessRequest,
 )
 from database import Base, engine
 import models
+from redis_client import redis_client
+
+import hashlib
+import json
+import time
+
 
 app = FastAPI()
 Base.metadata.create_all(bind=engine)
 
 MAX_CONTEXT_MESSAGES = 20
-
+CACHE_TTL_SECONDS = 60
 RATE_LIMIT_REQUESTS = 1
 RATE_LIMIT_WINDOW_SECONDS = 60
+
+### block 1 health endpoint
 @app.get("/health")
 def health():
     return {"status": "ok"}
-
-from redis_client import redis_client
 
 
 @app.get("/health/redis")
@@ -129,9 +136,9 @@ async def chat(
             status_code=403,
             detail="You do not have access to this conversation",
         )
-
         username = current_user["username"]
 
+    # redis rate limiting;
     rate_limit_key = f"rate_limit:{username}"
 
     request_count = await redis_client.incr(rate_limit_key)
@@ -229,3 +236,49 @@ async def chat(
         ),
         latency_ms=round(result.latency * 1000),
     )
+
+@app.post("/chat/stateless")
+async def stateless_chat(
+    body: StatelessRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    # Same effective input -> same deterministic cache key.
+    message_hash = hashlib.sha256(
+        body.message.encode("utf-8")
+    ).hexdigest()
+
+    cache_key = f"llm_cache:{message_hash}"
+
+    # 1. Check Redis.
+    cached = await redis_client.get(cache_key)
+
+    if cached is not None:
+        print(f"[CACHE] HIT key={cache_key}")
+
+        return {
+            "response": cached,
+            "cache_hit": True,
+        }
+
+    # 2. Cache miss -> call LLM.
+    print(f"[CACHE] MISS key={cache_key}")
+
+    result = await generate([
+        {
+            "role": "user",
+            "content": body.message,
+        }
+    ])
+
+    # 3. Store response temporarily.
+    await redis_client.set(
+        cache_key,
+        result.text,
+        ex=CACHE_TTL_SECONDS,
+    )
+    
+
+    return {
+        "response": result.text,
+        "cache_hit": False,
+    }
