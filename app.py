@@ -1,4 +1,4 @@
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Request
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -29,9 +29,24 @@ from redis_client import redis_client
 import hashlib
 import json
 import time
+import uuid
 
+from logging_config import logger
 
 app = FastAPI()
+
+@app.middleware("http")
+async def add_request_id(request: Request, call_next):
+    request_id = str(uuid.uuid4())
+
+    request.state.request_id = request_id
+
+    response = await call_next(request)
+
+    response.headers["X-Request-ID"] = request_id
+
+    return response
+
 Base.metadata.create_all(bind=engine)
 
 MAX_CONTEXT_MESSAGES = 20
@@ -113,9 +128,13 @@ def create_conversation(
 @app.post("/chat", response_model=ChatResponse)
 async def chat(
     body: ChatRequest,
+    request: Request,
     current_user: dict = Depends(get_current_user),
     db: Session = Depends(get_db),
-):
+):  
+    request_start = time.perf_counter()
+    request_id = request.state.request_id
+    username = current_user["username"]
     username = current_user["username"]
 
     # 1. Load the requested conversation.
@@ -151,13 +170,32 @@ async def chat(
 
     ttl = await redis_client.ttl(rate_limit_key)
 
-    print(
-        f"[RATE LIMIT] user={username} "
-        f"count={request_count}/{RATE_LIMIT_REQUESTS} "
-        f"ttl={ttl}s"
-    )
+    # print(
+    #     f"[RATE LIMIT] user={username} "
+    #     f"count={request_count}/{RATE_LIMIT_REQUESTS} "
+    #     f"ttl={ttl}s"
+    # )
 
     if request_count > RATE_LIMIT_REQUESTS:
+        total_latency_ms = round(
+            (time.perf_counter() - request_start) * 1000
+        )
+
+        logger.warning(
+            "Chat request rate limited",
+            extra={
+                "event_data": {
+                    "event": "chat_request_rate_limited",
+                    "request_id": request_id,
+                    "user_id": username,
+                    "conversation_id": body.conversation_id,
+                    "rate_limited": True,
+                    "total_latency_ms": total_latency_ms,
+                    "status": "failed",
+                }
+            },
+        )
+
         raise HTTPException(
             status_code=429,
             detail="Too many requests",
@@ -201,11 +239,31 @@ async def chat(
     try:
         result = await generate(messages)
 
-    except LLMError:
+    except LLMError as e:
+        total_latency_ms = round(
+            (time.perf_counter() - request_start) * 1000
+        )
+
+        logger.error(
+            "Chat request failed",
+            extra={
+                "event_data": {
+                    "event": "chat_request_failed",
+                    "request_id": request_id,
+                    "user_id": username,
+                    "conversation_id": body.conversation_id,
+                    "error_type": type(e).__name__,
+                    "total_latency_ms": total_latency_ms,
+                    "status": "failed",
+                }
+            },
+        )
+
         raise HTTPException(
             status_code=502,
             detail="LLM provider failed",
         )
+
 
     # 6. Persist user + assistant messages.
     user_message = models.Message(
@@ -224,8 +282,32 @@ async def chat(
     db.add(assistant_message)
     db.commit()
 
-    print(f"Messages in context: {len(messages)}")
-    print(f"Input tokens: {result.input_tokens}")
+    total_latency_ms = round(
+        (time.perf_counter() - request_start) * 1000
+    )
+
+    llm_latency_ms = round(result.latency * 1000)
+    
+    logger.info(
+        "Chat request completed",
+        extra={
+            "event_data": {
+                "event": "chat_request_completed",
+                "request_id": request_id,
+                "user_id": username,
+                "conversation_id": conversation.id,
+                "model": result.model,
+                "input_tokens": result.input_tokens,
+                "output_tokens": result.output_tokens,
+                "llm_latency_ms": llm_latency_ms,
+                "total_latency_ms": total_latency_ms,
+                "cache_hit": False,
+                "attempts": result.attempts,
+                "rate_limited": False,
+                "status": "success",
+            }
+        },
+    )
 
     return ChatResponse(
         response=result.text,
@@ -240,8 +322,12 @@ async def chat(
 @app.post("/chat/stateless")
 async def stateless_chat(
     body: StatelessRequest,
+    request: Request,
     current_user: dict = Depends(get_current_user),
+    
 ):
+    request_id = request.state.request_id
+    username = current_user["username"]
     # Same effective input -> same deterministic cache key.
     message_hash = hashlib.sha256(
         body.message.encode("utf-8")
@@ -253,7 +339,17 @@ async def stateless_chat(
     cached = await redis_client.get(cache_key)
 
     if cached is not None:
-        print(f"[CACHE] HIT key={cache_key}")
+        logger.info(
+            "LLM cache hit",
+            extra={
+                "event_data": {
+                    "event": "llm_cache_hit",
+                    "request_id": request_id,
+                    "user_id": username,
+                    "cache_hit": True,
+                }
+            },
+        )
 
         return {
             "response": cached,
@@ -261,7 +357,17 @@ async def stateless_chat(
         }
 
     # 2. Cache miss -> call LLM.
-    print(f"[CACHE] MISS key={cache_key}")
+    logger.info(
+        "LLM cache miss",
+        extra={
+            "event_data": {
+                "event": "llm_cache_miss",
+                "request_id": request_id,
+                "user_id": username,
+                "cache_hit": False,
+            }
+        },
+    )
 
     result = await generate([
         {
@@ -276,7 +382,7 @@ async def stateless_chat(
         result.text,
         ex=CACHE_TTL_SECONDS,
     )
-    
+
 
     return {
         "response": result.text,

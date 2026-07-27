@@ -5,6 +5,7 @@ import asyncio
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types, errors
+from logging_config import logger
 load_dotenv()
 
 
@@ -100,9 +101,16 @@ async def generate(messages: list[dict[str, str]]) -> LLMResult:
 
             wait_seconds = BASE_BACKOFF_SECONDS * (2 ** (attempt - 1))
 
-            print(
-                f"[LLM] Attempt {attempt} failed "
-                f"(status {status}). Retrying in {wait_seconds}s..."
+            logger.warning(
+                "LLM attempt failed; retrying",
+                extra={
+                    "event_data": {
+                        "event": "llm_retry",
+                        "attempt": attempt,
+                        "provider_status": status,
+                        "retry_in_seconds": wait_seconds,
+                    }
+                },
             )
 
             await asyncio.sleep(wait_seconds)
@@ -115,12 +123,18 @@ async def generate(messages: list[dict[str, str]]) -> LLMResult:
 
             wait_seconds = BASE_BACKOFF_SECONDS * (2 ** (attempt - 1))
 
-            print(
-                f"[LLM] Attempt {attempt} failed "
-                f"(connection/timeout). Retrying in {wait_seconds}s..."
+            logger.warning(
+                "LLM connection/timeout failure",
+                extra={
+                    "event_data": {
+                        "event": "llm_connection_timeout",
+                        "attempt": attempt,
+                        "retry_in_seconds": wait_seconds,
+                    }
+                },
             )
 
-            time.sleep(wait_seconds)
+            await asyncio.sleep(wait_seconds)
 
         except Exception as e:
             raise LLMError(
