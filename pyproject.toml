@@ -1,0 +1,31 @@
+[project]
+name = "ai-chatbot-backend"
+version = "1.0.0"
+description = "Production-style AI chatbot backend: FastAPI, JWT auth, PostgreSQL, Redis, Gemini, and structured observability."
+readme = "README.md"
+requires-python = ">=3.11"
+
+[tool.ruff]
+line-length = 88
+target-version = "py311"
+
+[tool.ruff.lint]
+select = [
+    "E",
+    "F",
+    "W",
+    "I",
+    "UP",
+    "B",
+]
+# FastAPI idioms intentionally use `Depends(...)` as an argument default.
+ignore = ["B008"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+pythonpath = ["."]
+filterwarnings = [
+    "ignore:Using `httpx` with `starlette.testclient` is deprecated:UserWarning",
+    "ignore:The anyio.abc.BlockingPortal alias is deprecated:DeprecationWarning",
+]

@@ -1,24 +1,11 @@
-import os
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import jwt
-from dotenv import load_dotenv
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pwdlib import PasswordHash
 
-
-load_dotenv()
-
-
-# -------------------------------------------------------------------
-# Configuration
-# -------------------------------------------------------------------
-
-JWT_SECRET = os.environ["JWT_SECRET"]
-JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
-JWT_EXPIRE_MINUTES = int(os.getenv("JWT_EXPIRE_MINUTES", "30"))
-
+from config import JWT_ALGORITHM, JWT_EXPIRE_MINUTES, JWT_SECRET
 
 # -------------------------------------------------------------------
 # Password hashing
@@ -96,7 +83,7 @@ def authenticate_user(
 # -------------------------------------------------------------------
 
 def create_access_token(username: str) -> str:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     payload = {
         "sub": username,
@@ -139,14 +126,14 @@ def get_current_user(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Token expired",
             headers={"WWW-Authenticate": "Bearer"},
-        )
+        ) from None
 
     except jwt.InvalidTokenError:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid token",
             headers={"WWW-Authenticate": "Bearer"},
-        )
+        ) from None
 
     username = payload["sub"]
 

@@ -1,39 +1,49 @@
+import hashlib
+import time
+import uuid
+
 from fastapi import Depends, FastAPI, HTTPException, Request
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 import models
-from database import Base, engine, get_db
-
 from authentication import (
     authenticate_user,
     create_access_token,
     create_user,
     get_current_user,
 )
-from llm_harness import generate, LLMError
+from database import Base, engine, get_db
+from llm_harness import LLMError, generate
+from logging_config import logger
+from redis_client import redis_client
 from schema import (
     ChatRequest,
     ChatResponse,
     CreateConversationResponse,
     LoginRequest,
     RegisterRequest,
+    StatelessRequest,
     TokenResponse,
     Usage,
-    StatelessRequest,
 )
-from database import Base, engine
-import models
-from redis_client import redis_client
 
-import hashlib
-import json
-import time
-import uuid
+app = FastAPI(
+    title="AI Chatbot Backend",
+    description=(
+        "A small production-style AI chat backend built while learning "
+        "system design: JWT auth, FastAPI, PostgreSQL persistence, Redis "
+        "caching/rate limiting, an LLM reliability harness, and structured "
+        "observability."
+    ),
+    version="1.0.0",
+)
 
-from logging_config import logger
+MAX_CONTEXT_MESSAGES = 20
+CACHE_TTL_SECONDS = 60
+RATE_LIMIT_REQUESTS = 1
+RATE_LIMIT_WINDOW_SECONDS = 60
 
-app = FastAPI()
 
 @app.middleware("http")
 async def add_request_id(request: Request, call_next):
@@ -47,20 +57,20 @@ async def add_request_id(request: Request, call_next):
 
     return response
 
+
 Base.metadata.create_all(bind=engine)
 
-MAX_CONTEXT_MESSAGES = 20
-CACHE_TTL_SECONDS = 60
-RATE_LIMIT_REQUESTS = 1
-RATE_LIMIT_WINDOW_SECONDS = 60
 
-### block 1 health endpoint
-@app.get("/health")
+@app.get("/health", tags=["health"], summary="Liveness check")
 def health():
     return {"status": "ok"}
 
 
-@app.get("/health/redis")
+@app.get(
+    "/health/redis",
+    tags=["health"],
+    summary="Redis connection check",
+)
 async def redis_health():
     pong = await redis_client.ping()
 
@@ -69,7 +79,13 @@ async def redis_health():
         "ping": pong,
     }
 
-@app.post("/register", status_code=201)
+
+@app.post(
+    "/register",
+    status_code=201,
+    tags=["authentication"],
+    summary="Register a new user",
+)
 def register(body: RegisterRequest):
     user = create_user(
         username=body.username,
@@ -81,7 +97,12 @@ def register(body: RegisterRequest):
     }
 
 
-@app.post("/login", response_model=TokenResponse)
+@app.post(
+    "/login",
+    response_model=TokenResponse,
+    tags=["authentication"],
+    summary="Log in and receive an access token",
+)
 def login(body: LoginRequest):
     user = authenticate_user(
         username=body.username,
@@ -102,10 +123,14 @@ def login(body: LoginRequest):
         access_token=token,
         token_type="bearer",
     )
+
+
 @app.post(
     "/conversations",
     response_model=CreateConversationResponse,
     status_code=201,
+    tags=["conversations"],
+    summary="Create a new conversation",
 )
 def create_conversation(
     current_user: dict = Depends(get_current_user),
@@ -125,16 +150,21 @@ def create_conversation(
         conversation_id=conversation.id,
     )
 
-@app.post("/chat", response_model=ChatResponse)
+
+@app.post(
+    "/chat",
+    response_model=ChatResponse,
+    tags=["chat"],
+    summary="Send a message inside a conversation",
+)
 async def chat(
     body: ChatRequest,
     request: Request,
     current_user: dict = Depends(get_current_user),
     db: Session = Depends(get_db),
-):  
+):
     request_start = time.perf_counter()
     request_id = request.state.request_id
-    username = current_user["username"]
     username = current_user["username"]
 
     # 1. Load the requested conversation.
@@ -155,9 +185,8 @@ async def chat(
             status_code=403,
             detail="You do not have access to this conversation",
         )
-        username = current_user["username"]
 
-    # redis rate limiting;
+    # 3. Redis rate limiting.
     rate_limit_key = f"rate_limit:{username}"
 
     request_count = await redis_client.incr(rate_limit_key)
@@ -167,14 +196,6 @@ async def chat(
             rate_limit_key,
             RATE_LIMIT_WINDOW_SECONDS,
         )
-
-    ttl = await redis_client.ttl(rate_limit_key)
-
-    # print(
-    #     f"[RATE LIMIT] user={username} "
-    #     f"count={request_count}/{RATE_LIMIT_REQUESTS} "
-    #     f"ttl={ttl}s"
-    # )
 
     if request_count > RATE_LIMIT_REQUESTS:
         total_latency_ms = round(
@@ -201,7 +222,7 @@ async def chat(
             detail="Too many requests",
         )
 
-    # 3. Load recent conversation history.
+    # 4. Load recent conversation history.
     statement = (
         select(models.Message)
         .where(
@@ -211,15 +232,13 @@ async def chat(
         .limit(MAX_CONTEXT_MESSAGES)
     )
 
-    history = list(
-        db.scalars(statement).all()
-    )
+    history = list(db.scalars(statement).all())
 
     # Query was newest -> oldest.
     # LLM needs oldest -> newest.
     history.reverse()
 
-    # 4. Convert DB rows into the format expected by the LLM harness.
+    # 5. Convert DB rows into the format expected by the LLM harness.
     messages = [
         {
             "role": message.role,
@@ -235,7 +254,7 @@ async def chat(
 
     messages.append(current_message)
 
-    # 5. Call the existing LLM harness.
+    # 6. Call the LLM harness.
     try:
         result = await generate(messages)
 
@@ -262,10 +281,9 @@ async def chat(
         raise HTTPException(
             status_code=502,
             detail="LLM provider failed",
-        )
+        ) from None
 
-
-    # 6. Persist user + assistant messages.
+    # 7. Persist user + assistant messages.
     user_message = models.Message(
         conversation_id=conversation.id,
         role="user",
@@ -287,7 +305,7 @@ async def chat(
     )
 
     llm_latency_ms = round(result.latency * 1000)
-    
+
     logger.info(
         "Chat request completed",
         extra={
@@ -319,15 +337,20 @@ async def chat(
         latency_ms=round(result.latency * 1000),
     )
 
-@app.post("/chat/stateless")
+
+@app.post(
+    "/chat/stateless",
+    tags=["chat"],
+    summary="Send a stateless message with Redis response caching",
+)
 async def stateless_chat(
     body: StatelessRequest,
     request: Request,
     current_user: dict = Depends(get_current_user),
-    
 ):
     request_id = request.state.request_id
     username = current_user["username"]
+
     # Same effective input -> same deterministic cache key.
     message_hash = hashlib.sha256(
         body.message.encode("utf-8")
@@ -369,12 +392,14 @@ async def stateless_chat(
         },
     )
 
-    result = await generate([
-        {
-            "role": "user",
-            "content": body.message,
-        }
-    ])
+    result = await generate(
+        [
+            {
+                "role": "user",
+                "content": body.message,
+            }
+        ]
+    )
 
     # 3. Store response temporarily.
     await redis_client.set(
@@ -382,7 +407,6 @@ async def stateless_chat(
         result.text,
         ex=CACHE_TTL_SECONDS,
     )
-
 
     return {
         "response": result.text,

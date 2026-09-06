@@ -1,2 +1,10 @@
-google-generativeai
-python-dotenv
+fastapi==0.141.1
+uvicorn[standard]==0.52.4
+sqlalchemy==2.0.52
+psycopg[binary]==3.3.5
+redis==8.1.0
+pydantic==2.13.5
+google-genai==2.22.0
+python-dotenv==1.2.3
+PyJWT==2.13.0
+pwdlib[argon2]==0.3.1
