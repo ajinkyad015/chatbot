@@ -1,26 +1,17 @@
+import asyncio
 import os
 import time
 from dataclasses import dataclass
-import asyncio
-from dotenv import load_dotenv
+
 from google import genai
-from google.genai import types, errors
+from google.genai import errors, types
+
+from config import GEMINI_API_KEY, GEMINI_MODEL
 from logging_config import logger
-load_dotenv()
 
-
-MODEL = "gemini-3.5-flash"
-TIMEOUT_SECONDS = 10
-MAX_ATTEMPTS = 3
-BASE_BACKOFF_SECONDS = 1
-
-
-client = genai.Client(
-    api_key=os.environ.get("GEMINI_API_KEY"),
-    http_options=types.HttpOptions(
-        timeout=TIMEOUT_SECONDS * 1000
-    )
-)
+LLM_TIMEOUT_SECONDS = int(os.getenv("LLM_TIMEOUT_SECONDS", "10"))
+LLM_MAX_ATTEMPTS = int(os.getenv("LLM_MAX_ATTEMPTS", "3"))
+LLM_BASE_BACKOFF_SECONDS = float(os.getenv("LLM_BASE_BACKOFF_SECONDS", "1.0"))
 
 
 @dataclass
@@ -35,18 +26,36 @@ class LLMResult:
 
 class LLMError(Exception):
     """Error exposed by the LLM harness to the application."""
-    pass
+
+
+def _create_client():
+    if not GEMINI_API_KEY:
+        raise LLMError(
+            "GEMINI_API_KEY is not configured. "
+            "Copy .env.example to .env and set a valid key."
+        )
+
+    return genai.Client(
+        api_key=GEMINI_API_KEY,
+        http_options=types.HttpOptions(
+            timeout=LLM_TIMEOUT_SECONDS * 1000
+        ),
+    )
+
 
 async def generate(messages: list[dict[str, str]]) -> LLMResult:
     start = time.perf_counter()
+    client = _create_client()
 
-    for attempt in range(1, MAX_ATTEMPTS + 1):
+    for attempt in range(1, LLM_MAX_ATTEMPTS + 1):
         try:
-            response =  await client.aio.models.generate_content(
-                model=MODEL,
+            response = await client.aio.models.generate_content(
+                model=GEMINI_MODEL,
                 contents=[
                     types.Content(
-                        role="model" if message["role"] == "assistant" else "user",
+                        role="model"
+                        if message["role"] == "assistant"
+                        else "user",
                         parts=[
                             types.Part.from_text(
                                 text=message["content"]
@@ -56,8 +65,10 @@ async def generate(messages: list[dict[str, str]]) -> LLMResult:
                     for message in messages
                 ],
                 config=types.GenerateContentConfig(
-                    system_instruction="You are a concise, helpful assistant."
-                )
+                    system_instruction=(
+                        "You are a concise, helpful assistant."
+                    )
+                ),
             )
 
             latency = time.perf_counter() - start
@@ -65,7 +76,7 @@ async def generate(messages: list[dict[str, str]]) -> LLMResult:
 
             return LLMResult(
                 text=response.text,
-                model=MODEL,
+                model=GEMINI_MODEL,
                 latency=latency,
                 input_tokens=usage.prompt_token_count or 0,
                 output_tokens=usage.candidates_token_count or 0,
@@ -82,9 +93,7 @@ async def generate(messages: list[dict[str, str]]) -> LLMResult:
                 ) from e
 
             if status == 400:
-                raise LLMError(
-                    "Invalid LLM request."
-                ) from e
+                raise LLMError("Invalid LLM request.") from e
 
             # Transient failures: retry may succeed.
             retryable = status == 408 or status == 429 or status >= 500
@@ -94,12 +103,14 @@ async def generate(messages: list[dict[str, str]]) -> LLMResult:
                     f"LLM request failed with status {status}."
                 ) from e
 
-            if attempt == MAX_ATTEMPTS:
+            if attempt == LLM_MAX_ATTEMPTS:
                 raise LLMError(
                     f"LLM request failed after {attempt} attempts: {e}"
                 ) from e
 
-            wait_seconds = BASE_BACKOFF_SECONDS * (2 ** (attempt - 1))
+            wait_seconds = LLM_BASE_BACKOFF_SECONDS * (
+                2 ** (attempt - 1)
+            )
 
             logger.warning(
                 "LLM attempt failed; retrying",
@@ -116,12 +127,14 @@ async def generate(messages: list[dict[str, str]]) -> LLMResult:
             await asyncio.sleep(wait_seconds)
 
         except (TimeoutError, ConnectionError) as e:
-            if attempt == MAX_ATTEMPTS:
+            if attempt == LLM_MAX_ATTEMPTS:
                 raise LLMError(
                     f"LLM connection/timeout failure after {attempt} attempts."
                 ) from e
 
-            wait_seconds = BASE_BACKOFF_SECONDS * (2 ** (attempt - 1))
+            wait_seconds = LLM_BASE_BACKOFF_SECONDS * (
+                2 ** (attempt - 1)
+            )
 
             logger.warning(
                 "LLM connection/timeout failure",

@@ -11,7 +11,6 @@ class LoginRequest(BaseModel):
     password: str
 
 
-
 class TokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
@@ -37,5 +36,6 @@ class ChatResponse(BaseModel):
     usage: Usage
     latency_ms: int
 
+
 class StatelessRequest(BaseModel):
-    message: str
+    message: str = Field(min_length=1, max_length=10_000)
